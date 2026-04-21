@@ -2,7 +2,7 @@
 
 3Dドットグローブ（自転・拠点点滅・ネットワーク線付き）のLP埋め込みデモ。
 
-**デモURL**: https://globe-demo.vercel.app/
+**デモURL**: https://globe-demo-eieio.vercel.app/
 **ローカルプレビュー**: `index.html` をブラウザで直接開くか、`npx serve`
 
 ---
