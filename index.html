@@ -1,0 +1,863 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Interactive Globe Demo</title>
+
+    <!--
+  Interactive Globe Demo — LP 埋め込みコンポーネント（地球儀のみ / rich minimal）
+
+  [使い方]
+  A) iframe 埋め込み:
+     <iframe src="globe.html" style="width:1440px;height:810px;border:0;" loading="lazy"></iframe>
+
+  B) インライン埋め込み:
+     <section class="yg-root">…</section> + <style> + <script> を貼り付け。
+     親要素に高さ指定が必要。CSS は `yg-` 接頭辞でスコープ化。
+-->
+
+    <style>
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        height: 100%;
+        background: #aeb4ff;
+      }
+
+      .yg-root {
+        position: relative;
+        width: 100%;
+        height: 100%;
+        min-height: 100vh;
+        overflow: hidden;
+        background: radial-gradient(
+          ellipse 120% 90% at 32% 28%,
+          #ccceff 0%,
+          #a9afef 45%,
+          #8289e3 75%,
+          #6d75d8 100%
+        );
+      }
+      .yg-root *,
+      .yg-root *::before,
+      .yg-root *::after {
+        box-sizing: border-box;
+      }
+      .yg-canvas {
+        position: absolute;
+        inset: 0;
+        cursor: grab;
+      }
+      .yg-canvas:active {
+        cursor: grabbing;
+      }
+      .yg-canvas canvas {
+        display: block;
+        width: 100% !important;
+        height: 100% !important;
+      }
+    </style>
+  </head>
+  <body>
+    <section class="yg-root" id="yg-root">
+      <div class="yg-canvas" id="yg-canvas"></div>
+    </section>
+
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+          "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+        }
+      }
+    </script>
+
+    <script type="module">
+      import * as THREE from "three";
+      import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+
+      const mount = document.getElementById("yg-canvas");
+
+      // ═════════════════════════════════════════════════════════════════════
+      // Device profile — drive all quality knobs from one place so the mobile
+      // path stays snappy on iOS Safari without hurting desktop fidelity.
+      // ═════════════════════════════════════════════════════════════════════
+      const IS_MOBILE =
+        /iPhone|iPad|iPod|Android/i.test(navigator.userAgent) ||
+        (window.matchMedia && window.matchMedia("(pointer: coarse)").matches);
+
+      const CFG = IS_MOBILE
+        ? {
+            dprCap: 1.5,
+            fibN: 28000, // half the land-dot density
+            tintSegs: 56, // sphere tessellation for tint & inner
+            innerSegs: 48,
+            rimSegs: 32,
+            texW: 1024, // tint texture size
+            texH: 512,
+            tintNeighborhood: false, // skip 9-tap sampling in tint shader
+            arcMax: 7,
+            arcSpawnMin: 0.35,
+            arcSpawnRand: 0.7,
+            landPx: 3.1, // land point size (CSS px)
+            officePx: 12,
+            officePulsePx: 5,
+            antialias: false, // MSAA is a big fill cost on mobile GPUs
+            targetFps: 45, // cap rAF to save battery on idle phones
+          }
+        : {
+            dprCap: 2,
+            fibN: 60000,
+            tintSegs: 96,
+            innerSegs: 96,
+            rimSegs: 64,
+            texW: 2048,
+            texH: 1024,
+            tintNeighborhood: true,
+            arcMax: 14,
+            arcSpawnMin: 0.22,
+            arcSpawnRand: 0.45,
+            landPx: 3.6,
+            officePx: 14,
+            officePulsePx: 6,
+            antialias: true,
+            targetFps: 60,
+          };
+
+      const scene = new THREE.Scene();
+      const camera = new THREE.PerspectiveCamera(30, 1, 0.1, 100);
+      camera.position.set(0, 0, 3.3);
+
+      const renderer = new THREE.WebGLRenderer({
+        antialias: CFG.antialias,
+        alpha: true,
+        powerPreference: IS_MOBILE ? "low-power" : "default",
+      });
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio, CFG.dprCap));
+      renderer.setClearColor(0x000000, 0);
+      mount.appendChild(renderer.domElement);
+
+      const pointsMats = [];
+
+      function resize() {
+        const w = mount.clientWidth,
+          h = mount.clientHeight;
+        renderer.setSize(w, h, false);
+        camera.aspect = w / h;
+        camera.updateProjectionMatrix();
+        const dpr = Math.min(window.devicePixelRatio, CFG.dprCap);
+        for (const m of pointsMats) {
+          if (m.uniforms && m.uniforms.uPixelRatio)
+            m.uniforms.uPixelRatio.value = dpr;
+        }
+      }
+      resize();
+      new ResizeObserver(resize).observe(mount);
+
+      const globeGroup = new THREE.Group();
+      globeGroup.rotation.z = 0.408; // ~23.4° axial tilt
+      globeGroup.rotation.y = 2.05; // start near Japan
+      scene.add(globeGroup);
+
+      const R = 1;
+
+      const controls = new OrbitControls(camera, renderer.domElement);
+      controls.enablePan = false;
+      controls.enableZoom = false;
+      controls.enableDamping = true;
+      controls.dampingFactor = 0.08;
+      controls.rotateSpeed = 0.55;
+      let userInteracting = false;
+      controls.addEventListener("start", () => {
+        userInteracting = true;
+      });
+      controls.addEventListener("end", () => {
+        userInteracting = false;
+      });
+
+      function latLngToVec3(lat, lng, radius = R) {
+        const p = ((90 - lat) * Math.PI) / 180;
+        const t = ((lng + 180) * Math.PI) / 180;
+        return new THREE.Vector3(
+          -radius * Math.sin(p) * Math.cos(t),
+          radius * Math.cos(p),
+          radius * Math.sin(p) * Math.sin(t),
+        );
+      }
+
+      // ═════════════════════════════════════════════════════════════════════
+      // Shared facing-based alpha snippet — back side is dimmer but visible
+      // ═════════════════════════════════════════════════════════════════════
+      const FACING_VS = `
+  vec3 worldPos = (modelMatrix * vec4(position, 1.0)).xyz;
+  vec3 center   = (modelMatrix * vec4(0.0, 0.0, 0.0, 1.0)).xyz;
+  vec3 nrm      = normalize(worldPos - center);
+  vec3 viewDir  = normalize(cameraPosition - worldPos);
+  vFacing = dot(nrm, viewDir);
+`;
+
+      // ═════════════════════════════════════════════════════════════════════
+      // Inner tinted globe — gives the dots a darker front-facing backdrop
+      // so white continents read clearly. Fades to transparent at the rim
+      // for the see-through-to-back feel.
+      // ═════════════════════════════════════════════════════════════════════
+      function buildInnerGlobe() {
+        const geo = new THREE.SphereGeometry(
+          R * 0.995,
+          CFG.innerSegs,
+          CFG.innerSegs,
+        );
+        const mat = new THREE.ShaderMaterial({
+          transparent: true,
+          depthWrite: false,
+          vertexShader: `
+            varying float vF;
+            void main() {
+              vec3 wp = (modelMatrix * vec4(position, 1.0)).xyz;
+              vec3 c  = (modelMatrix * vec4(0.0, 0.0, 0.0, 1.0)).xyz;
+              vec3 n  = normalize(wp - c);
+              vec3 vd = normalize(cameraPosition - wp);
+              vF = dot(n, vd);
+              gl_Position = projectionMatrix * viewMatrix * vec4(wp, 1.0);
+            }
+          `,
+          fragmentShader: `
+            varying float vF;
+            void main() {
+              // center of visible hemisphere is darker, rim fades out
+              float center = smoothstep(0.05, 0.85, vF);
+              float a = center * 0.38;
+              // soft gradient tint — upper-left lighter, lower-right darker
+              // (approximate via facing)
+              vec3 col = mix(vec3(0.42, 0.46, 0.78), vec3(0.25, 0.29, 0.62), center);
+              gl_FragColor = vec4(col, a);
+            }
+          `,
+        });
+        const mesh = new THREE.Mesh(geo, mat);
+        mesh.renderOrder = 1;
+        globeGroup.add(mesh);
+      }
+
+      // ═════════════════════════════════════════════════════════════════════
+      // Land tint sphere — maps the topology image as a texture and paints land
+      // pixels with a very soft pale tint. Provides a gentle "painted continent"
+      // beneath the dots so landmass shapes read clearly even in low density.
+      // ═════════════════════════════════════════════════════════════════════
+      function buildLandTintSphere(sharedCanvas) {
+        const W = sharedCanvas.width,
+          H = sharedCanvas.height;
+        const tex = new THREE.CanvasTexture(sharedCanvas);
+        tex.wrapS = THREE.RepeatWrapping;
+        tex.minFilter = THREE.LinearFilter;
+        tex.magFilter = THREE.LinearFilter;
+        tex.needsUpdate = true;
+
+        const geo = new THREE.SphereGeometry(
+          R * 0.998,
+          CFG.tintSegs,
+          CFG.tintSegs,
+        );
+        // Mobile shader: skip the 9-tap neighborhood loop — big fill-rate win
+        // on iOS GPUs. Desktop keeps the 3×3 max for crisper small-island edges.
+        const fragShader = CFG.tintNeighborhood
+          ? `
+            uniform sampler2D uTex;
+            uniform vec2 uTexel;
+            varying vec2 vUv;
+            varying float vF;
+            float brightness(vec2 uv) {
+              vec3 t = texture2D(uTex, uv).rgb;
+              return (t.r + t.g + t.b) / 3.0;
+            }
+            void main() {
+              float m = 0.0;
+              for (int dy = -1; dy <= 1; dy++) {
+                for (int dx = -1; dx <= 1; dx++) {
+                  float b = brightness(vUv + vec2(float(dx), float(dy)) * uTexel);
+                  m = max(m, b);
+                }
+              }
+              float land = smoothstep(0.055, 0.09, m);
+              float front = smoothstep(-0.1, 0.45, vF);
+              vec3 col = vec3(0.94, 0.96, 1.0);
+              float a = land * 0.19 * mix(0.35, 1.0, front);
+              if (a < 0.006) discard;
+              gl_FragColor = vec4(col, a);
+            }
+          `
+          : `
+            uniform sampler2D uTex;
+            varying vec2 vUv;
+            varying float vF;
+            void main() {
+              vec3 t = texture2D(uTex, vUv).rgb;
+              float br = (t.r + t.g + t.b) / 3.0;
+              float land = smoothstep(0.05, 0.13, br);
+              float front = smoothstep(-0.1, 0.45, vF);
+              vec3 col = vec3(0.94, 0.96, 1.0);
+              float a = land * 0.19 * mix(0.35, 1.0, front);
+              if (a < 0.006) discard;
+              gl_FragColor = vec4(col, a);
+            }
+          `;
+        const mat = new THREE.ShaderMaterial({
+          transparent: true,
+          depthWrite: false,
+          uniforms: {
+            uTex: { value: tex },
+            uTexel: { value: new THREE.Vector2(1 / W, 1 / H) },
+          },
+          vertexShader: `
+            varying vec2 vUv;
+            varying float vF;
+            void main() {
+              vUv = uv;
+              vec3 wp = (modelMatrix * vec4(position, 1.0)).xyz;
+              vec3 c  = (modelMatrix * vec4(0.0, 0.0, 0.0, 1.0)).xyz;
+              vec3 n  = normalize(wp - c);
+              vec3 vd = normalize(cameraPosition - wp);
+              vF = dot(n, vd);
+              gl_Position = projectionMatrix * viewMatrix * vec4(wp, 1.0);
+            }
+          `,
+          fragmentShader: fragShader,
+        });
+        const mesh = new THREE.Mesh(geo, mat);
+        mesh.renderOrder = 1.2;
+        globeGroup.add(mesh);
+      }
+
+      // ═════════════════════════════════════════════════════════════════════
+      // Lat/Long wireframe — thin white lines, dimmer on back
+      // ═════════════════════════════════════════════════════════════════════
+      function buildWireframe() {
+        const mat = new THREE.ShaderMaterial({
+          transparent: true,
+          depthWrite: false,
+          depthTest: false,
+          vertexShader: `
+      varying float vFacing;
+      void main() {
+        ${FACING_VS}
+        vFacing = dot(nrm, viewDir);
+        gl_Position = projectionMatrix * viewMatrix * vec4(worldPos, 1.0);
+      }
+    `,
+          fragmentShader: `
+      varying float vFacing;
+      void main() {
+        float front = smoothstep(-0.35, 0.45, vFacing);
+        float a = mix(0.09, 0.32, front);
+        gl_FragColor = vec4(1.0, 1.0, 1.0, a);
+      }
+    `,
+        });
+
+        const group = new THREE.Group();
+        const radius = R * 1.004;
+        const segs = 140;
+
+        // Latitude parallels every 15°
+        for (let lat = -75; lat <= 75; lat += 15) {
+          const pts = [];
+          const latRad = (lat * Math.PI) / 180;
+          const rr = Math.cos(latRad) * radius;
+          const yy = Math.sin(latRad) * radius;
+          for (let i = 0; i <= segs; i++) {
+            const a = (i / segs) * Math.PI * 2;
+            pts.push(new THREE.Vector3(Math.cos(a) * rr, yy, Math.sin(a) * rr));
+          }
+          const geo = new THREE.BufferGeometry().setFromPoints(pts);
+          group.add(new THREE.Line(geo, mat));
+        }
+        // Longitude meridians every 30°
+        for (let lng = 0; lng < 360; lng += 30) {
+          const pts = [];
+          const lngRad = (lng * Math.PI) / 180;
+          for (let i = 0; i <= segs; i++) {
+            const a = (i / segs) * Math.PI - Math.PI / 2;
+            const rr = Math.cos(a) * radius;
+            const yy = Math.sin(a) * radius;
+            pts.push(
+              new THREE.Vector3(
+                Math.cos(lngRad) * rr,
+                yy,
+                Math.sin(lngRad) * rr,
+              ),
+            );
+          }
+          const geo = new THREE.BufferGeometry().setFromPoints(pts);
+          group.add(new THREE.Line(geo, mat));
+        }
+
+        group.renderOrder = 1;
+        globeGroup.add(group);
+      }
+
+      // ═════════════════════════════════════════════════════════════════════
+      // Land dots — Points with soft circle + facing-based alpha
+      // ═════════════════════════════════════════════════════════════════════
+      // Create once, shared between dot sampling and tint sphere texture.
+      function createLandMaskCanvas(image) {
+        const W = CFG.texW,
+          H = CFG.texH;
+        const canvas = document.createElement("canvas");
+        canvas.width = W;
+        canvas.height = H;
+        canvas.getContext("2d").drawImage(image, 0, 0, W, H);
+        return canvas;
+      }
+
+      function sampleLandPositions(sharedCanvas) {
+        const W = sharedCanvas.width,
+          H = sharedCanvas.height;
+        const data = sharedCanvas
+          .getContext("2d")
+          .getImageData(0, 0, W, H).data;
+
+        const brightnessAt = (px, py) => {
+          px = ((px % W) + W) % W;
+          py = Math.max(0, Math.min(H - 1, py));
+          const idx = (py * W + px) * 4;
+          return (data[idx] + data[idx + 1] + data[idx + 2]) / 3;
+        };
+        const maxBrightness3x3 = (px, py) => {
+          let m = 0;
+          for (let dy = -1; dy <= 1; dy++) {
+            for (let dx = -1; dx <= 1; dx++) {
+              const b = brightnessAt(px + dx, py + dy);
+              if (b > m) m = b;
+            }
+          }
+          return m;
+        };
+
+        const positions = [];
+        const N = CFG.fibN,
+          phi = (1 + Math.sqrt(5)) / 2;
+        for (let i = 0; i < N; i++) {
+          const t = (i + 0.5) / N;
+          const inc = Math.acos(1 - 2 * t);
+          const az = (2 * Math.PI * i) / phi;
+          const x = Math.sin(inc) * Math.cos(az);
+          const y = Math.cos(inc);
+          const z = Math.sin(inc) * Math.sin(az);
+          // Inverse of latLngToVec3 — derive lat/lng from the 3D point so image
+          // sampling location matches where the dot will actually render.
+          // (latLngToVec3 uses x = -sin(p)cos(t), z = sin(p)sin(t) with
+          // t = (lng+180)π/180, so lng = atan2(z, -x) * 180/π.)
+          const lat = 90 - (inc * 180) / Math.PI;
+          const lng = (Math.atan2(z, -x) * 180) / Math.PI;
+          const u = (lng + 180) / 360;
+          const v = (90 - lat) / 180;
+          const px = Math.floor(u * W);
+          const py = Math.min(H - 1, Math.floor(v * H));
+          const b = maxBrightness3x3(px, py);
+          // lower threshold + neighborhood max → catches coastlines, small islands,
+          // flat lowlands (Amazon basin, Siberian plains) that are dim in topology
+          if (b > 18) positions.push(x * 1.002, y * 1.002, z * 1.002);
+        }
+        return positions;
+      }
+
+      function buildLandPoints(positions) {
+        const geo = new THREE.BufferGeometry();
+        geo.setAttribute(
+          "position",
+          new THREE.Float32BufferAttribute(positions, 3),
+        );
+
+        const mat = new THREE.ShaderMaterial({
+          transparent: true,
+          depthWrite: false,
+          depthTest: false,
+          uniforms: { uPixelRatio: { value: Math.min(devicePixelRatio, 2) } },
+          vertexShader: `
+      uniform float uPixelRatio;
+      varying float vFacing;
+      void main() {
+        ${FACING_VS}
+        gl_PointSize = ${CFG.landPx.toFixed(2)} * uPixelRatio;
+        gl_Position = projectionMatrix * viewMatrix * vec4(worldPos, 1.0);
+      }
+    `,
+          fragmentShader: `
+      varying float vFacing;
+      void main() {
+        vec2 uv = gl_PointCoord - 0.5;
+        float d = length(uv);
+        float circle = smoothstep(0.5, 0.12, d);
+        // Sharper front/back separation — back is a faint hint, front is crisp
+        float front = smoothstep(-0.05, 0.3, vFacing);
+        float a = circle * mix(0.12, 1.0, front);
+        if (a < 0.01) discard;
+        gl_FragColor = vec4(1.0, 1.0, 1.0, a);
+      }
+    `,
+        });
+        pointsMats.push(mat);
+
+        const pts = new THREE.Points(geo, mat);
+        pts.renderOrder = 2;
+        globeGroup.add(pts);
+      }
+
+      // ═════════════════════════════════════════════════════════════════════
+      // Offices — global cities: pulsing glow points
+      // ═════════════════════════════════════════════════════════════════════
+      const officesLatLng = [
+        { lat: 35.6762, lng: 139.6503 }, // Tokyo
+        { lat: 40.7128, lng: -74.006 }, // New York
+        { lat: 51.5074, lng: -0.1278 }, // London
+        { lat: 1.3521, lng: 103.8198 }, // Singapore
+        { lat: -33.8688, lng: 151.2093 }, // Sydney
+        { lat: 25.2048, lng: 55.2708 }, // Dubai
+        { lat: 48.8566, lng: 2.3522 }, // Paris
+        { lat: 34.0522, lng: -118.2437 }, // Los Angeles
+        { lat: 37.7749, lng: -122.4194 }, // San Francisco
+        { lat: 22.3193, lng: 114.1694 }, // Hong Kong
+        { lat: 37.5665, lng: 126.978 }, // Seoul
+        { lat: 31.2304, lng: 121.4737 }, // Shanghai
+        { lat: 19.076, lng: 72.8777 }, // Mumbai
+        { lat: 52.52, lng: 13.405 }, // Berlin
+        { lat: 52.3676, lng: 4.9041 }, // Amsterdam
+        { lat: 40.4168, lng: -3.7038 }, // Madrid
+        { lat: 41.9028, lng: 12.4964 }, // Rome
+        { lat: 41.0082, lng: 28.9784 }, // Istanbul
+        { lat: 55.7558, lng: 37.6173 }, // Moscow
+        { lat: 30.0444, lng: 31.2357 }, // Cairo
+        { lat: -1.2921, lng: 36.8219 }, // Nairobi
+        { lat: -33.9249, lng: 18.4241 }, // Cape Town
+        { lat: -23.5505, lng: -46.6333 }, // São Paulo
+        { lat: 19.4326, lng: -99.1332 }, // Mexico City
+        { lat: 43.6532, lng: -79.3832 }, // Toronto
+        { lat: 41.8781, lng: -87.6298 }, // Chicago
+        { lat: 13.7563, lng: 100.5018 }, // Bangkok
+        { lat: -6.2088, lng: 106.8456 }, // Jakarta
+        { lat: -37.8136, lng: 144.9631 }, // Melbourne
+        { lat: -36.8485, lng: 174.7633 }, // Auckland
+      ];
+
+      const officePositions = [];
+      let officeMat = null;
+
+      function buildOffices() {
+        const positions = [];
+        const phases = [];
+        for (const o of officesLatLng) {
+          const p = latLngToVec3(o.lat, o.lng, R * 1.014);
+          positions.push(p.x, p.y, p.z);
+          phases.push(Math.random() * Math.PI * 2);
+          officePositions.push(p);
+        }
+        const geo = new THREE.BufferGeometry();
+        geo.setAttribute(
+          "position",
+          new THREE.Float32BufferAttribute(positions, 3),
+        );
+        geo.setAttribute("phase", new THREE.Float32BufferAttribute(phases, 1));
+
+        const mat = new THREE.ShaderMaterial({
+          transparent: true,
+          depthWrite: false,
+          depthTest: false,
+          blending: THREE.NormalBlending,
+          uniforms: {
+            uTime: { value: 0 },
+            uPixelRatio: { value: Math.min(devicePixelRatio, 2) },
+          },
+          vertexShader: `
+      attribute float phase;
+      uniform float uTime;
+      uniform float uPixelRatio;
+      varying float vFacing;
+      varying float vPulse;
+      void main() {
+        ${FACING_VS}
+        float pulse = 0.72 + 0.28 * sin(uTime * 1.5 + phase);
+        vPulse = pulse;
+        gl_PointSize = (${CFG.officePx.toFixed(2)} + ${CFG.officePulsePx.toFixed(2)} * pulse) * uPixelRatio;
+        gl_Position = projectionMatrix * viewMatrix * vec4(worldPos, 1.0);
+      }
+    `,
+          fragmentShader: `
+      varying float vFacing;
+      varying float vPulse;
+      void main() {
+        vec2 uv = gl_PointCoord - 0.5;
+        float d = length(uv);
+        float core = smoothstep(0.28, 0.10, d);
+        float halo = smoothstep(0.5, 0.0, d) * 0.55;
+        float front = smoothstep(-0.18, 0.4, vFacing);
+        float a = (core + halo * vPulse) * mix(0.28, 1.0, front);
+        if (a < 0.01) discard;
+        vec3 col = mix(vec3(0.11, 0.17, 0.55), vec3(0.28, 0.38, 0.95), vPulse);
+        gl_FragColor = vec4(col, a);
+      }
+    `,
+        });
+        pointsMats.push(mat);
+        officeMat = mat;
+
+        const pts = new THREE.Points(geo, mat);
+        pts.renderOrder = 3;
+        globeGroup.add(pts);
+      }
+
+      // ═════════════════════════════════════════════════════════════════════
+      // Network arcs — random connection lines
+      // ═════════════════════════════════════════════════════════════════════
+      class Arc {
+        constructor(pA, pB) {
+          const dist = pA.distanceTo(pB);
+          const lift = 1.0 + 0.06 + dist * 0.22;
+          const mid = pA
+            .clone()
+            .add(pB)
+            .multiplyScalar(0.5)
+            .normalize()
+            .multiplyScalar(lift);
+          const curve = new THREE.QuadraticBezierCurve3(
+            pA.clone().multiplyScalar(1.016),
+            mid,
+            pB.clone().multiplyScalar(1.016),
+          );
+          const segs = 64;
+          const pts = curve.getPoints(segs);
+          const geo = new THREE.BufferGeometry().setFromPoints(pts);
+          geo.setDrawRange(0, 0);
+          this.count = segs + 1;
+          const mat = new THREE.LineBasicMaterial({
+            color: 0xe8ecff,
+            transparent: true,
+            opacity: 0,
+            depthWrite: false,
+            depthTest: false,
+            blending: THREE.AdditiveBlending,
+          });
+          this.line = new THREE.Line(geo, mat);
+          this.line.renderOrder = 4;
+          this.life = 0;
+          this.total = 3.8;
+
+          // endpoint glow (small flash where arc terminates)
+          const endGeo = new THREE.BufferGeometry();
+          endGeo.setAttribute(
+            "position",
+            new THREE.Float32BufferAttribute(
+              [
+                pA.x * 1.017,
+                pA.y * 1.017,
+                pA.z * 1.017,
+                pB.x * 1.017,
+                pB.y * 1.017,
+                pB.z * 1.017,
+              ],
+              3,
+            ),
+          );
+          const endMat = new THREE.PointsMaterial({
+            color: 0xffffff,
+            size: 20,
+            sizeAttenuation: false,
+            transparent: true,
+            opacity: 0,
+            depthWrite: false,
+            depthTest: false,
+            blending: THREE.AdditiveBlending,
+          });
+          // we'll replace PointsMaterial with a custom one for soft circle:
+          endMat.onBeforeCompile = (s) => {
+            s.fragmentShader = s.fragmentShader.replace(
+              "#include <premultiplied_alpha_fragment>",
+              `
+          vec2 uv = gl_PointCoord - 0.5;
+          float d = length(uv);
+          float soft = smoothstep(0.5, 0.0, d);
+          gl_FragColor.a *= soft;
+          #include <premultiplied_alpha_fragment>
+        `,
+            );
+          };
+          this.endpoints = new THREE.Points(endGeo, endMat);
+          this.endpoints.renderOrder = 5;
+        }
+        update(dt) {
+          this.life += dt;
+          const t = this.life / this.total;
+          if (t >= 1) return false;
+          const draw = Math.min(1, t * 2.4);
+          this.line.geometry.setDrawRange(0, Math.floor(draw * this.count));
+          let op;
+          if (t < 0.3) op = t / 0.3;
+          else if (t < 0.7) op = 1;
+          else op = 1 - (t - 0.7) / 0.3;
+          this.line.material.opacity = op * 0.72;
+          this.endpoints.material.opacity = op * 0.9;
+          return true;
+        }
+        dispose() {
+          this.line.geometry.dispose();
+          this.line.material.dispose();
+          this.endpoints.geometry.dispose();
+          this.endpoints.material.dispose();
+        }
+      }
+
+      const arcs = [];
+      let spawnTimer = 0;
+      function updateArcs(dt) {
+        spawnTimer -= dt;
+        if (
+          spawnTimer <= 0 &&
+          arcs.length < CFG.arcMax &&
+          officePositions.length > 0
+        ) {
+          spawnTimer = CFG.arcSpawnMin + Math.random() * CFG.arcSpawnRand;
+          const i1 = Math.floor(Math.random() * officePositions.length);
+          let i2 = Math.floor(Math.random() * officePositions.length);
+          let tries = 0;
+          while (
+            i2 === i1 ||
+            officePositions[i1].distanceTo(officePositions[i2]) < 0.25
+          ) {
+            i2 = Math.floor(Math.random() * officePositions.length);
+            if (++tries > 10) break;
+          }
+          const arc = new Arc(officePositions[i1], officePositions[i2]);
+          globeGroup.add(arc.line);
+          globeGroup.add(arc.endpoints);
+          arcs.push(arc);
+        }
+        for (let i = arcs.length - 1; i >= 0; i--) {
+          if (!arcs[i].update(dt)) {
+            globeGroup.remove(arcs[i].line);
+            globeGroup.remove(arcs[i].endpoints);
+            arcs[i].dispose();
+            arcs.splice(i, 1);
+          }
+        }
+      }
+
+      // ═════════════════════════════════════════════════════════════════════
+      // Rim glow — atmospheric halo
+      // ═════════════════════════════════════════════════════════════════════
+      function buildRim() {
+        const geo = new THREE.SphereGeometry(
+          R * 1.065,
+          CFG.rimSegs,
+          CFG.rimSegs,
+        );
+        const mat = new THREE.ShaderMaterial({
+          transparent: true,
+          depthWrite: false,
+          side: THREE.BackSide,
+          blending: THREE.AdditiveBlending,
+          vertexShader: `
+      varying vec3 vN;
+      varying vec3 vV;
+      void main() {
+        vN = normalize(normalMatrix * normal);
+        vec4 mv = modelViewMatrix * vec4(position, 1.0);
+        vV = normalize(-mv.xyz);
+        gl_Position = projectionMatrix * mv;
+      }
+    `,
+          fragmentShader: `
+      varying vec3 vN;
+      varying vec3 vV;
+      void main() {
+        float rim = 1.0 - abs(dot(normalize(vN), normalize(vV)));
+        rim = pow(rim, 2.6);
+        gl_FragColor = vec4(0.82, 0.86, 1.0, rim * 0.4);
+      }
+    `,
+        });
+        const mesh = new THREE.Mesh(geo, mat);
+        mesh.renderOrder = 0;
+        scene.add(mesh);
+      }
+
+      // ═════════════════════════════════════════════════════════════════════
+      // Boot
+      // ═════════════════════════════════════════════════════════════════════
+      buildRim();
+      buildInnerGlobe();
+      buildWireframe();
+      buildOffices();
+
+      const img = new Image();
+      img.crossOrigin = "anonymous";
+      img.onload = () => {
+        // Share one offscreen canvas between the dot sampler and the tint
+        // sphere texture — halves the drawImage + ImageData allocation cost.
+        const shared = createLandMaskCanvas(img);
+        buildLandPoints(sampleLandPositions(shared));
+        buildLandTintSphere(shared);
+      };
+      img.onerror = () => {
+        const positions = [];
+        const N = Math.min(10000, CFG.fibN),
+          phi = (1 + Math.sqrt(5)) / 2;
+        for (let i = 0; i < N; i++) {
+          const t = (i + 0.5) / N;
+          const inc = Math.acos(1 - 2 * t);
+          const az = (2 * Math.PI * i) / phi;
+          positions.push(
+            Math.sin(inc) * Math.cos(az),
+            Math.cos(inc),
+            Math.sin(inc) * Math.sin(az),
+          );
+        }
+        buildLandPoints(positions);
+      };
+      img.src = "https://unpkg.com/three-globe/example/img/earth-topology.png";
+
+      // ═════════════════════════════════════════════════════════════════════
+      // Visibility gating — pause the render loop when the canvas is offscreen
+      // (LP scroll) or the tab is backgrounded. Biggest mobile battery saver.
+      // ═════════════════════════════════════════════════════════════════════
+      let inViewport = true;
+      let tabActive = !document.hidden;
+      if ("IntersectionObserver" in window) {
+        new IntersectionObserver(
+          (entries) => {
+            inViewport = entries[0].isIntersecting;
+          },
+          { threshold: 0 },
+        ).observe(mount);
+      }
+      document.addEventListener("visibilitychange", () => {
+        tabActive = !document.hidden;
+      });
+
+      // ═════════════════════════════════════════════════════════════════════
+      // Animate — rAF with optional FPS cap on mobile
+      // ═════════════════════════════════════════════════════════════════════
+      const CLOCK = new THREE.Clock();
+      const FRAME_MIN = CFG.targetFps >= 60 ? 0 : 1000 / CFG.targetFps - 1;
+      let lastFrame = 0;
+      function animate(now) {
+        requestAnimationFrame(animate);
+        if (!inViewport || !tabActive) {
+          // Keep clock paused by consuming delta so first resumed frame is smooth
+          CLOCK.getDelta();
+          return;
+        }
+        if (FRAME_MIN > 0 && now - lastFrame < FRAME_MIN) return;
+        lastFrame = now || 0;
+
+        const dt = Math.min(0.05, CLOCK.getDelta());
+        if (officeMat) officeMat.uniforms.uTime.value = CLOCK.elapsedTime;
+        if (!userInteracting) globeGroup.rotation.y += dt * 0.07;
+        updateArcs(dt);
+        controls.update();
+        renderer.render(scene, camera);
+      }
+      animate(0);
+    </script>
+  </body>
+</html>
