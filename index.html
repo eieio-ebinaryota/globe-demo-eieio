@@ -23,7 +23,7 @@
         margin: 0;
         padding: 0;
         height: 100%;
-        background: #aeb4ff;
+        background: #3a6ba0;
       }
 
       .yg-root {
@@ -32,12 +32,13 @@
         height: 100%;
         min-height: 100vh;
         overflow: hidden;
-        background: radial-gradient(
-          ellipse 120% 90% at 32% 28%,
-          #ccceff 0%,
-          #a9afef 45%,
-          #8289e3 75%,
-          #6d75d8 100%
+        background: linear-gradient(
+          to bottom,
+          #eef2f6 0%,
+          #c4d4e2 28%,
+          #7ea1bf 60%,
+          #4a78a8 85%,
+          #2f5e90 100%
         );
       }
       .yg-root *,
@@ -231,7 +232,7 @@
               float a = center * 0.38;
               // soft gradient tint — upper-left lighter, lower-right darker
               // (approximate via facing)
-              vec3 col = mix(vec3(0.42, 0.46, 0.78), vec3(0.25, 0.29, 0.62), center);
+              vec3 col = mix(vec3(0.36, 0.50, 0.68), vec3(0.18, 0.32, 0.52), center);
               gl_FragColor = vec4(col, a);
             }
           `,
@@ -594,7 +595,7 @@
         float front = smoothstep(-0.18, 0.4, vFacing);
         float a = (core + halo * vPulse) * mix(0.28, 1.0, front);
         if (a < 0.01) discard;
-        vec3 col = mix(vec3(0.11, 0.17, 0.55), vec3(0.28, 0.38, 0.95), vPulse);
+        vec3 col = mix(vec3(0.10, 0.25, 0.50), vec3(0.30, 0.55, 0.90), vPulse);
         gl_FragColor = vec4(col, a);
       }
     `,
@@ -631,7 +632,7 @@
           geo.setDrawRange(0, 0);
           this.count = segs + 1;
           const mat = new THREE.LineBasicMaterial({
-            color: 0xe8ecff,
+            color: 0xeaf2fb,
             transparent: true,
             opacity: 0,
             depthWrite: false,
@@ -772,7 +773,7 @@
       void main() {
         float rim = 1.0 - abs(dot(normalize(vN), normalize(vV)));
         rim = pow(rim, 2.6);
-        gl_FragColor = vec4(0.82, 0.86, 1.0, rim * 0.4);
+        gl_FragColor = vec4(0.78, 0.88, 1.0, rim * 0.4);
       }
     `,
         });
