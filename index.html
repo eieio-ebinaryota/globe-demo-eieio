@@ -3,10 +3,10 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Interactive Globe Demo</title>
+    <title>YAMAZEN — Global Network</title>
 
     <!--
-  Interactive Globe Demo — LP 埋め込みコンポーネント（地球儀のみ / rich minimal）
+  YAMAZEN Global Network — LP 埋め込みコンポーネント（地球儀のみ / rich minimal）
 
   [使い方]
   A) iframe 埋め込み:
@@ -23,7 +23,7 @@
         margin: 0;
         padding: 0;
         height: 100%;
-        background: #3a6ba0;
+        background: #aeb4ff;
       }
 
       .yg-root {
@@ -32,13 +32,12 @@
         height: 100%;
         min-height: 100vh;
         overflow: hidden;
-        background: linear-gradient(
-          to bottom,
-          #eef2f6 0%,
-          #c4d4e2 28%,
-          #7ea1bf 60%,
-          #4a78a8 85%,
-          #2f5e90 100%
+        background: radial-gradient(
+          ellipse 120% 90% at 32% 28%,
+          #ccceff 0%,
+          #a9afef 45%,
+          #8289e3 75%,
+          #6d75d8 100%
         );
       }
       .yg-root *,
@@ -232,7 +231,7 @@
               float a = center * 0.38;
               // soft gradient tint — upper-left lighter, lower-right darker
               // (approximate via facing)
-              vec3 col = mix(vec3(0.36, 0.50, 0.68), vec3(0.18, 0.32, 0.52), center);
+              vec3 col = mix(vec3(0.42, 0.46, 0.78), vec3(0.25, 0.29, 0.62), center);
               gl_FragColor = vec4(col, a);
             }
           `,
@@ -274,14 +273,17 @@
               return (t.r + t.g + t.b) / 3.0;
             }
             void main() {
-              float m = 0.0;
+              // earth-water.png: black=land, white=water. We want LAND, so take
+              // the MIN brightness across the 3×3 neighborhood (= darkest =
+              // most-land), then invert to get a 0..1 land mask.
+              float m = 1.0;
               for (int dy = -1; dy <= 1; dy++) {
                 for (int dx = -1; dx <= 1; dx++) {
                   float b = brightness(vUv + vec2(float(dx), float(dy)) * uTexel);
-                  m = max(m, b);
+                  m = min(m, b);
                 }
               }
-              float land = smoothstep(0.055, 0.09, m);
+              float land = smoothstep(0.6, 0.4, m);
               float front = smoothstep(-0.1, 0.45, vF);
               vec3 col = vec3(0.94, 0.96, 1.0);
               float a = land * 0.19 * mix(0.35, 1.0, front);
@@ -296,7 +298,8 @@
             void main() {
               vec3 t = texture2D(uTex, vUv).rgb;
               float br = (t.r + t.g + t.b) / 3.0;
-              float land = smoothstep(0.05, 0.13, br);
+              // earth-water.png: black=land. Invert brightness to get land mask.
+              float land = smoothstep(0.6, 0.4, br);
               float front = smoothstep(-0.1, 0.45, vF);
               vec3 col = vec3(0.94, 0.96, 1.0);
               float a = land * 0.19 * mix(0.35, 1.0, front);
@@ -425,12 +428,15 @@
           const idx = (py * W + px) * 4;
           return (data[idx] + data[idx + 1] + data[idx + 2]) / 3;
         };
-        const maxBrightness3x3 = (px, py) => {
-          let m = 0;
+        // earth-water.png: black=land. Use the MIN of the 3×3 neighborhood so
+        // that even a single dark pixel under the sample point counts as land
+        // (catches coastlines, small islands).
+        const minBrightness3x3 = (px, py) => {
+          let m = 255;
           for (let dy = -1; dy <= 1; dy++) {
             for (let dx = -1; dx <= 1; dx++) {
               const b = brightnessAt(px + dx, py + dy);
-              if (b > m) m = b;
+              if (b < m) m = b;
             }
           }
           return m;
@@ -446,20 +452,21 @@
           const x = Math.sin(inc) * Math.cos(az);
           const y = Math.cos(inc);
           const z = Math.sin(inc) * Math.sin(az);
-          // Inverse of latLngToVec3 — derive lat/lng from the 3D point so image
-          // sampling location matches where the dot will actually render.
-          // (latLngToVec3 uses x = -sin(p)cos(t), z = sin(p)sin(t) with
-          // t = (lng+180)π/180, so lng = atan2(z, -x) * 180/π.)
-          const lat = 90 - (inc * 180) / Math.PI;
-          const lng = (Math.atan2(z, -x) * 180) / Math.PI;
-          const u = (lng + 180) / 360;
-          const v = (90 - lat) / 180;
-          const px = Math.floor(u * W);
+          // Texture UV must match Three.js SphereGeometry defaults so dots line
+          // up with the tint sphere. SphereGeometry uses u = phi/(2π), v = θ/π
+          // with phi = atan2(z, -x). Compute u/v directly without round-tripping
+          // through lng (the lng path was off by 180° from latLngToVec3's
+          // t = (lng+180)π/180 convention).
+          let u = Math.atan2(z, -x) / (2 * Math.PI);
+          if (u < 0) u += 1;
+          const v = inc / Math.PI;
+          const px = Math.floor(u * W) % W;
           const py = Math.min(H - 1, Math.floor(v * H));
-          const b = maxBrightness3x3(px, py);
-          // lower threshold + neighborhood max → catches coastlines, small islands,
-          // flat lowlands (Amazon basin, Siberian plains) that are dim in topology
-          if (b > 18) positions.push(x * 1.002, y * 1.002, z * 1.002);
+          const b = minBrightness3x3(px, py);
+          // earth-water.png is binary-ish (black=land, white=water). 130 is well
+          // above the small antialiased halo at coastlines but well below water
+          // pixels (~255), so coastlines and tiny islands still register as land.
+          if (b < 130) positions.push(x * 1.002, y * 1.002, z * 1.002);
         }
         return positions;
       }
@@ -507,39 +514,145 @@
       }
 
       // ═════════════════════════════════════════════════════════════════════
-      // Offices — global cities: pulsing glow points
+      // YAMAZEN global network — auto-generated from
+      // https://www.yamazen.co.jp/about/network/ (2026-05-02).
+      // Japan: 56 sites (one per physical building)
+      // Overseas: 59 cities across 13 countries
       // ═════════════════════════════════════════════════════════════════════
       const officesLatLng = [
-        { lat: 35.6762, lng: 139.6503 }, // Tokyo
-        { lat: 40.7128, lng: -74.006 }, // New York
-        { lat: 51.5074, lng: -0.1278 }, // London
-        { lat: 1.3521, lng: 103.8198 }, // Singapore
-        { lat: -33.8688, lng: 151.2093 }, // Sydney
-        { lat: 25.2048, lng: 55.2708 }, // Dubai
-        { lat: 48.8566, lng: 2.3522 }, // Paris
-        { lat: 34.0522, lng: -118.2437 }, // Los Angeles
-        { lat: 37.7749, lng: -122.4194 }, // San Francisco
-        { lat: 22.3193, lng: 114.1694 }, // Hong Kong
-        { lat: 37.5665, lng: 126.978 }, // Seoul
-        { lat: 31.2304, lng: 121.4737 }, // Shanghai
-        { lat: 19.076, lng: 72.8777 }, // Mumbai
-        { lat: 52.52, lng: 13.405 }, // Berlin
-        { lat: 52.3676, lng: 4.9041 }, // Amsterdam
-        { lat: 40.4168, lng: -3.7038 }, // Madrid
-        { lat: 41.9028, lng: 12.4964 }, // Rome
-        { lat: 41.0082, lng: 28.9784 }, // Istanbul
-        { lat: 55.7558, lng: 37.6173 }, // Moscow
-        { lat: 30.0444, lng: 31.2357 }, // Cairo
-        { lat: -1.2921, lng: 36.8219 }, // Nairobi
-        { lat: -33.9249, lng: 18.4241 }, // Cape Town
-        { lat: -23.5505, lng: -46.6333 }, // São Paulo
-        { lat: 19.4326, lng: -99.1332 }, // Mexico City
-        { lat: 43.6532, lng: -79.3832 }, // Toronto
-        { lat: 41.8781, lng: -87.6298 }, // Chicago
-        { lat: 13.7563, lng: 100.5018 }, // Bangkok
-        { lat: -6.2088, lng: 106.8456 }, // Jakarta
-        { lat: -37.8136, lng: 144.9631 }, // Melbourne
-        { lat: -36.8485, lng: 174.7633 }, // Auckland
+        // ── Japan ──
+        { lat: 31.5968, lng: 130.5572 }, // 鹿児島県鹿児島市東郡元町11-9
+        { lat: 31.9076, lng: 131.4204 }, // 宮崎県宮崎市神宮西2-78-1
+        { lat: 32.7502, lng: 129.8781 }, // 長崎県長崎市家野町13-14
+        { lat: 32.8034, lng: 130.7083 }, // 熊本県熊本市南区江越2-14-45
+        { lat: 33.2394, lng: 131.6097 }, // 大分県大分市新栄町15-15
+        { lat: 33.5899, lng: 130.4018 }, // 福岡県福岡市博多区東比恵2-20-18
+        { lat: 33.8395, lng: 132.7654 }, // 愛媛県松山市三番町7-6-10
+        { lat: 33.883, lng: 130.8749 }, // 福岡県北九州市小倉北区片野新町2-11-3
+        { lat: 34.0517, lng: 131.5629 }, // 山口県防府市佐波2-4-7
+        { lat: 34.3426, lng: 134.0465 }, // 香川県高松市六条町714
+        { lat: 34.3917, lng: 132.4518 }, // 広島県広島市西区中広町1-18-33
+        { lat: 34.4857, lng: 133.3623 }, // 広島県福山市春日町1-19-16
+        { lat: 34.5737, lng: 135.4829 }, // 大阪府堺市堺区宿院町西1-1-3 ISE伊勢住宅 宿院町西7801 4F
+        { lat: 34.6554, lng: 133.9195 }, // 岡山県岡山市北区下中野701-103
+        { lat: 34.6786, lng: 135.4914 }, // 大阪府大阪市西区立売堀2-3-16
+        { lat: 34.679, lng: 135.4896 }, // 大阪府大阪市西区立売堀3-2-5
+        { lat: 34.6791, lng: 135.4886 }, // 大阪府大阪市西区立売堀3-3-21 山善第3ビル（津波避難ビル）
+        { lat: 34.6822, lng: 135.4887 }, // 大阪府大阪市西区阿波座2-2-18
+        { lat: 34.6826, lng: 135.4937 }, // 大阪府大阪市西区西本町2-3-10 西本町インテス13階
+        { lat: 34.6932, lng: 135.1944 }, // 兵庫県神戸市中央区相生町1-2-1
+        { lat: 34.711, lng: 137.7259 }, // 静岡県浜松市中央区丸塚町159
+        { lat: 34.7325, lng: 135.4998 }, // 大阪府大阪市淀川区宮原3-5-24 新大阪第一生命ビルディング 13階
+        { lat: 34.8154, lng: 134.6855 }, // 兵庫県姫路市飾磨区中野田2-34
+        { lat: 34.9549, lng: 137.1728 }, // 愛知県岡崎市薮田2-1-7
+        { lat: 34.963, lng: 136.6302 }, // 三重県四日市市東日野2-5-12
+        { lat: 34.9752, lng: 138.3832 }, // 静岡県静岡市駿河区南町19-9
+        { lat: 35.0116, lng: 135.7681 }, // 京都府京都市伏見区竹田浄菩提院町308
+        { lat: 35.0132, lng: 135.9599 }, // 滋賀県草津市野村1-21-7
+        { lat: 35.1851, lng: 136.8998 }, // 愛知県名古屋市熱田区白鳥2-10-10
+        { lat: 35.3066, lng: 136.9341 }, // 愛知県小牧市元町1-39
+        { lat: 35.4231, lng: 136.7628 }, // 岐阜県岐阜市茜部大川2-25-1
+        { lat: 35.4276, lng: 133.3315 }, // 鳥取県米子市皆生新田3-2-42
+        { lat: 35.443, lng: 139.3625 }, // 神奈川県厚木市中町4-10-8
+        { lat: 35.4503, lng: 139.6344 }, // 神奈川県横浜市港北区新横浜3-6-5
+        { lat: 35.6048, lng: 140.1099 }, // 千葉県千葉市中央区新田町1-1 IMI未来ビル7階
+        { lat: 35.6346, lng: 139.7923 }, // 東京都江東区有明3-7-18 有明セントラルタワー8階・11階・12階
+        { lat: 35.658, lng: 139.7515 }, // 東京都港区港南2-16-2
+        { lat: 35.6664, lng: 139.3164 }, // 東京都八王子市田町6-2
+        { lat: 35.6728, lng: 139.817 }, // 東京都江東区亀戸2丁目22番17号 日本生命亀戸ビル5階
+        { lat: 35.7139, lng: 139.4078 }, // 東京都立川市柴崎町2-3-6
+        { lat: 35.8616, lng: 139.6456 }, // 埼玉県さいたま市大宮区桜木町1-7-5
+        { lat: 35.8676, lng: 139.9757 }, // 千葉県柏市東上町2-28
+        { lat: 36.0392, lng: 138.114 }, // 長野県諏訪市沖田町3-45
+        { lat: 36.0618, lng: 136.2261 }, // 福井県福井市中央一丁目3 番5 号 FUKUMACHI BLOCK 11F （区
+        { lat: 36.2912, lng: 139.3754 }, // 群馬県太田市南矢島町875-1
+        { lat: 36.3221, lng: 139.0033 }, // 群馬県高崎市問屋町2-2-4
+        { lat: 36.3659, lng: 140.4732 }, // 茨城県水戸市城南1-7-5
+        { lat: 36.4021, lng: 138.2491 }, // 長野県上田市住吉70-12
+        { lat: 36.555, lng: 139.8829 }, // 栃木県宇都宮市城東2-8-15
+        { lat: 36.5918, lng: 136.6307 }, // 石川県金沢市西念1-2-26
+        { lat: 36.6958, lng: 137.2136 }, // 富山県富山市大泉町3-5-13
+        { lat: 37.4049, lng: 140.3334 }, // 福島県郡山市亀田1-47-1
+        { lat: 37.447, lng: 138.8512 }, // 新潟県長岡市南七日町76-2
+        { lat: 38.2678, lng: 140.8691 }, // 宮城県仙台市若林区卸町3-3-14
+        { lat: 39.7021, lng: 141.1545 }, // 岩手県盛岡市盛岡駅前通16-21
+        { lat: 43.0682, lng: 141.3791 }, // 北海道札幌市中央区北二条東14-263-1
+
+        // ── Overseas ──
+        { lat: 50.0875, lng: 14.4213 }, // プラハ (Czech Republic)
+        { lat: 45.5202, lng: -122.6742 }, // ポートランド (USA)
+        { lat: 44.9773, lng: -93.2655 }, // ミネアポリス (USA)
+        { lat: 43.0386, lng: -87.9091 }, // ミルウォーキー (USA)
+        { lat: 42.3316, lng: -83.0466 }, // デトロイト (USA)
+        { lat: 41.8756, lng: -87.6244 }, // シカゴ (USA)
+        { lat: 41.8026, lng: 123.4279 }, // 瀋陽 (China)
+        { lat: 41.7646, lng: -72.6909 }, // ハートフォード (USA)
+        { lat: 41.4997, lng: -81.6937 }, // クリーブランド (USA)
+        { lat: 25.033, lng: 121.5654 }, // 台北 (Taiwan)
+        { lat: 41.08, lng: -85.1386 }, // フォートウェイン (USA)
+        { lat: 39.9527, lng: -75.1635 }, // フィラデルフィア (USA)
+        { lat: 39.7683, lng: -86.1584 }, // インディアナポリス (USA)
+        { lat: 39.7403, lng: 122.2558 }, // 大連 (China)
+        { lat: 39.3033, lng: 117.4164 }, // 天津 (China)
+        { lat: 39.1015, lng: -84.5125 }, // シンシナティ (USA)
+        { lat: 37.3362, lng: -121.8906 }, // サンノゼ (USA)
+        { lat: 36.0663, lng: 120.3778 }, // 青島 (China)
+        { lat: 35.2272, lng: -80.8431 }, // シャーロット (USA)
+        { lat: 34.261, lng: 108.9423 }, // 西安 (China)
+        { lat: 34.0537, lng: -118.2428 }, // ロサンゼルス (USA)
+        { lat: 33.4484, lng: -112.0741 }, // フェニックス (USA)
+        { lat: 32.7763, lng: -96.7969 }, // ダラス (USA)
+        { lat: 31.5777, lng: 120.2953 }, // 無錫 (China)
+        { lat: 31.3869, lng: 120.9765 }, // 昆山 (China)
+        { lat: 31.2313, lng: 121.47 }, // 上海 (China)
+        { lat: 30.7334, lng: 76.7797 }, // チャンディーガル (India)
+        { lat: 30.6599, lng: 104.0633 }, // 成都 (China)
+        { lat: 30.5789, lng: 114.2921 }, // 武漢 (China)
+        { lat: 30.249, lng: 120.2052 }, // 杭州 (China)
+        { lat: 30.0552, lng: 107.8749 }, // 重慶 (China)
+        { lat: 29.8622, lng: 121.6204 }, // 寧波 (China)
+        { lat: 28.4891, lng: 77.0112 }, // グルガオン (India)
+        { lat: 27.945, lng: -82.4583 }, // タンパ (USA)
+        { lat: 24.1477, lng: 120.6736 }, // 台中 (Taiwan)
+        { lat: 25.001, lng: 109.3414 }, // 柳州 (China)
+        { lat: 24.5439, lng: 118.0768 }, // 厦門 (China)
+        { lat: 23.1288, lng: 113.259 }, // 広州 (China)
+        { lat: 23.0184, lng: 113.7452 }, // 東莞 (China)
+        { lat: 22.6264, lng: -101.7048 }, // サン・ルイス・ポトシ (Mexico)
+        { lat: 22.5446, lng: 114.0545 }, // 深圳 (China)
+        { lat: 24.9929, lng: 121.301 }, // 桃園 (Taiwan)
+        { lat: 21.0283, lng: 105.854 }, // ハノイ (Vietnam)
+        { lat: 20.8623, lng: 106.6799 }, // ハイフォン (Vietnam)
+        { lat: 18.5472, lng: 99.055 }, // ランプーン (Thailand)
+        { lat: 18.5214, lng: 73.8545 }, // プネ (India)
+        { lat: 16.068, lng: 108.212 }, // ダナン (Vietnam)
+        { lat: 14.9711, lng: 102.0669 }, // コラート (Thailand)
+        { lat: 13.7525, lng: 100.4935 }, // バンコク (Thailand)
+        { lat: 13.0837, lng: 80.2702 }, // チェンナイ (India)
+        { lat: 12.9768, lng: 77.5901 }, // バンガロール (India)
+        { lat: 10.7755, lng: 106.7021 }, // ホーチミン ショールーム (Vietnam)
+        { lat: 5.4065, lng: 100.2559 }, // ペナン (Malaysia)
+        { lat: 3.1517, lng: 101.6942 }, // クアラルンプール (Malaysia)
+        { lat: 1.4582, lng: 103.7649 }, // ジョホールバル (Malaysia)
+        { lat: 1.1031, lng: 104.0384 }, // バタム (Indonesia)
+        { lat: -6.1754, lng: 106.8272 }, // ジャカルタ (Indonesia)
+        { lat: -6.2553, lng: 107.1451 }, // チカラン (Indonesia)
+        { lat: -7.2463, lng: 112.7378 }, // スラバヤ (Indonesia)
+
+        // ── Manual additions: parser missed single-city country lines
+        // (no comma → skipped) and Nominatim could not resolve some katakana
+        // names, so these were patched in by hand.
+        { lat: 37.5665, lng: 126.978 }, // ソウル (South Korea)
+        { lat: 1.3521, lng: 103.8198 }, // シンガポール (Singapore)
+        { lat: 14.3414, lng: 121.085 }, // ラグーナ (Philippines, Biñan)
+        { lat: 41.0082, lng: 28.9784 }, // イスタンブール (Turkey)
+        { lat: 48.7758, lng: 9.1829 }, // シュツットガルト (Germany)
+        { lat: 20.9488, lng: -101.428 }, // シラオ (Mexico)
+        { lat: 25.6866, lng: -100.3161 }, // モンテレイ (Mexico)
+        { lat: 35.9606, lng: -83.9207 }, // ノックスビル (USA, Knoxville)
+        { lat: 13.082, lng: 100.9213 }, // ピントン (Thailand)
+        { lat: 23.0225, lng: 72.5714 }, // アーメダバード (India, Ahmedabad)
+        { lat: 11.0168, lng: 76.9558 }, // コインバトール (India, Coimbatore)
       ];
 
       const officePositions = [];
@@ -595,7 +708,7 @@
         float front = smoothstep(-0.18, 0.4, vFacing);
         float a = (core + halo * vPulse) * mix(0.28, 1.0, front);
         if (a < 0.01) discard;
-        vec3 col = mix(vec3(0.10, 0.25, 0.50), vec3(0.30, 0.55, 0.90), vPulse);
+        vec3 col = mix(vec3(0.11, 0.17, 0.55), vec3(0.28, 0.38, 0.95), vPulse);
         gl_FragColor = vec4(col, a);
       }
     `,
@@ -632,7 +745,7 @@
           geo.setDrawRange(0, 0);
           this.count = segs + 1;
           const mat = new THREE.LineBasicMaterial({
-            color: 0xeaf2fb,
+            color: 0xe8ecff,
             transparent: true,
             opacity: 0,
             depthWrite: false,
@@ -773,7 +886,7 @@
       void main() {
         float rim = 1.0 - abs(dot(normalize(vN), normalize(vV)));
         rim = pow(rim, 2.6);
-        gl_FragColor = vec4(0.78, 0.88, 1.0, rim * 0.4);
+        gl_FragColor = vec4(0.82, 0.86, 1.0, rim * 0.4);
       }
     `,
         });
@@ -815,7 +928,10 @@
         }
         buildLandPoints(positions);
       };
-      img.src = "https://unpkg.com/three-globe/example/img/earth-topology.png";
+      // earth-water.png is a binary land/water mask (black=land, white=water)
+      // — much sharper coastlines than the bump/topology image we used before,
+      // which lost low-elevation coastal land (Korea, India, Europe, Indonesia).
+      img.src = "https://unpkg.com/three-globe/example/img/earth-water.png";
 
       // ═════════════════════════════════════════════════════════════════════
       // Visibility gating — pause the render loop when the canvas is offscreen
