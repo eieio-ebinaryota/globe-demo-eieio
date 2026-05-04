@@ -23,7 +23,8 @@
         margin: 0;
         padding: 0;
         height: 100%;
-        background: #aeb4ff;
+        background: #3a6ba0;
+        -webkit-text-size-adjust: 100%;
       }
 
       .yg-root {
@@ -31,13 +32,16 @@
         width: 100%;
         height: 100%;
         min-height: 100vh;
+        min-height: 100dvh;
         overflow: hidden;
-        background: radial-gradient(
-          ellipse 120% 90% at 32% 28%,
-          #ccceff 0%,
-          #a9afef 45%,
-          #8289e3 75%,
-          #6d75d8 100%
+        touch-action: none;
+        background: linear-gradient(
+          to bottom,
+          #eef2f6 0%,
+          #c4d4e2 28%,
+          #7ea1bf 60%,
+          #4a78a8 85%,
+          #2f5e90 100%
         );
       }
       .yg-root *,
@@ -146,6 +150,12 @@
           h = mount.clientHeight;
         renderer.setSize(w, h, false);
         camera.aspect = w / h;
+        // 縦長画面（スマホ縦持ち）でも地球が小さくなりすぎないよう
+        // カメラ距離をアスペクト比に応じて調整。横幅基準で fit するイメージ。
+        const baseZ = 3.3;
+        const fitZ = camera.aspect < 1 ? baseZ / camera.aspect : baseZ;
+        // 過度に引きすぎないようクランプ（最大 5.6）
+        camera.position.z = Math.min(5.6, Math.max(baseZ, fitZ * 0.95));
         camera.updateProjectionMatrix();
         const dpr = Math.min(window.devicePixelRatio, CFG.dprCap);
         for (const m of pointsMats) {
@@ -231,7 +241,7 @@
               float a = center * 0.38;
               // soft gradient tint — upper-left lighter, lower-right darker
               // (approximate via facing)
-              vec3 col = mix(vec3(0.42, 0.46, 0.78), vec3(0.25, 0.29, 0.62), center);
+              vec3 col = mix(vec3(0.36, 0.50, 0.68), vec3(0.18, 0.32, 0.52), center);
               gl_FragColor = vec4(col, a);
             }
           `,
@@ -708,7 +718,7 @@
         float front = smoothstep(-0.18, 0.4, vFacing);
         float a = (core + halo * vPulse) * mix(0.28, 1.0, front);
         if (a < 0.01) discard;
-        vec3 col = mix(vec3(0.11, 0.17, 0.55), vec3(0.28, 0.38, 0.95), vPulse);
+        vec3 col = mix(vec3(0.10, 0.25, 0.50), vec3(0.30, 0.55, 0.90), vPulse);
         gl_FragColor = vec4(col, a);
       }
     `,
@@ -745,7 +755,7 @@
           geo.setDrawRange(0, 0);
           this.count = segs + 1;
           const mat = new THREE.LineBasicMaterial({
-            color: 0xe8ecff,
+            color: 0xeaf2fb,
             transparent: true,
             opacity: 0,
             depthWrite: false,
@@ -886,7 +896,7 @@
       void main() {
         float rim = 1.0 - abs(dot(normalize(vN), normalize(vV)));
         rim = pow(rim, 2.6);
-        gl_FragColor = vec4(0.82, 0.86, 1.0, rim * 0.4);
+        gl_FragColor = vec4(0.78, 0.88, 1.0, rim * 0.4);
       }
     `,
         });
